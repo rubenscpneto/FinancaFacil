@@ -6,23 +6,29 @@ import { z } from "zod";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { ArrowLeft } from "lucide-react";
 import { formatCurrency, parseCurrency } from "@/lib/currency";
 import { formatDateForInput } from "@/lib/date";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { insertBudgetSchema } from "@shared/schema";
+import { budgetSchema, type InsertBudget } from "@shared/schema";
 import type { BudgetWithCategory, Category } from "@shared/schema";
-
-const formSchema = insertBudgetSchema.extend({
-  amount: z.string().min(1, "Valor é obrigatório"),
-  startDate: z.string().min(1, "Data de início é obrigatória"),
-  endDate: z.string().optional(),
-});
-
-type FormData = z.infer<typeof formSchema>;
+import { useAuth } from "@/hooks/useAuth";
 
 interface BudgetFormProps {
   budget?: BudgetWithCategory | null;
@@ -33,26 +39,44 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
 
   const { data: categories } = useQuery<Category[]>({
     queryKey: ["/api/categories"],
   });
 
-  const form = useForm<FormData>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
-      name: budget?.name || "",
-      amount: budget ? formatCurrency(parseFloat(budget.amount)) : "",
-      period: budget?.period || "monthly",
-      categoryId: budget?.categoryId || undefined,
-      startDate: budget ? formatDateForInput(new Date(budget.startDate)) : formatDateForInput(new Date()),
-      endDate: budget?.endDate ? formatDateForInput(new Date(budget.endDate)) : "",
-    },
+  const expenseCategories =
+    categories?.filter((cat) => cat.type === "expense") || [];
+
+  const form = useForm<z.infer<typeof budgetSchema>>({
+    resolver: zodResolver(budgetSchema),
+    defaultValues: budget
+      ? {
+          ...budget,
+          userId: budget.userId || user?.uid || "",
+          amount: Number(budget.amount),
+          categoryId:
+            typeof budget.categoryId === "string" ? budget.categoryId : "",
+          startDate: budget.startDate ? new Date(budget.startDate) : new Date(),
+          endDate: budget.endDate ? new Date(budget.endDate) : undefined,
+        }
+      : {
+          userId: user?.uid || "",
+          name: "",
+          amount: 0,
+          period: "monthly",
+          categoryId:
+            typeof expenseCategories?.[0]?.id === "string"
+              ? expenseCategories[0].id
+              : "",
+          startDate: new Date(),
+          endDate: undefined,
+        },
   });
 
   const budgetMutation = useMutation({
-    mutationFn: async (data: any) => {
-      if (budget) {
+    mutationFn: async (data: InsertBudget) => {
+      if (budget && budget.id) {
         await apiRequest("PUT", `/api/budgets/${budget.id}`, data);
       } else {
         await apiRequest("POST", "/api/budgets", data);
@@ -62,7 +86,9 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
       queryClient.invalidateQueries({ queryKey: ["/api/budgets"] });
       toast({
         title: "Sucesso",
-        description: budget ? "Orçamento atualizado com sucesso!" : "Orçamento criado com sucesso!",
+        description: budget
+          ? "Orçamento atualizado com sucesso!"
+          : "Orçamento criado com sucesso!",
       });
       onClose();
     },
@@ -75,25 +101,33 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
     },
   });
 
-  const onSubmit = async (data: FormData) => {
+  const onSubmit = async (data: z.infer<typeof budgetSchema>) => {
     setIsSubmitting(true);
+    if (!user) {
+      toast({
+        title: "Erro",
+        description: "Você precisa estar logado.",
+        variant: "destructive",
+      });
+      setIsSubmitting(false);
+      return;
+    }
     try {
-      const formattedData = {
+      const dataToSubmit: InsertBudget = {
         ...data,
-        amount: parseCurrency(data.amount).toString(),
-        categoryId: data.categoryId ? parseInt(data.categoryId.toString()) : null,
-        endDate: data.endDate || null,
+        userId: user.uid,
+        amount: Number(data.amount),
+        categoryId: data.categoryId === "" ? null : data.categoryId,
+        startDate: data.startDate ? new Date(data.startDate) : new Date(),
+        endDate: data.endDate ? new Date(data.endDate) : null,
       };
-      await budgetMutation.mutateAsync(formattedData);
+      await budgetMutation.mutateAsync(dataToSubmit);
     } catch (error) {
       console.error("Error submitting form:", error);
     } finally {
       setIsSubmitting(false);
     }
   };
-
-  // Filter only expense categories
-  const expenseCategories = categories?.filter(cat => cat.type === 'expense') || [];
 
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0">
@@ -111,8 +145,10 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
           </CardHeader>
           <CardContent>
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-                {/* Budget Name */}
+              <form
+                onSubmit={form.handleSubmit(onSubmit)}
+                className="space-y-6"
+              >
                 <FormField
                   control={form.control}
                   name="name"
@@ -120,14 +156,16 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                     <FormItem>
                       <FormLabel>Nome do Orçamento</FormLabel>
                       <FormControl>
-                        <Input placeholder="Ex: Orçamento Alimentação" {...field} />
+                        <Input
+                          placeholder="Ex: Orçamento Alimentação"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
 
-                {/* Amount */}
                 <FormField
                   control={form.control}
                   name="amount"
@@ -136,12 +174,13 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                       <FormLabel>Valor Limite</FormLabel>
                       <FormControl>
                         <Input
+                          type="text"
                           placeholder="R$ 0,00"
                           {...field}
+                          value={formatCurrency(Number(field.value || 0))}
                           onChange={(e) => {
-                            const value = e.target.value.replace(/[^\d,]/g, '');
-                            const formatted = formatCurrency(parseCurrency(value));
-                            field.onChange(formatted);
+                            const rawValue = e.target.value;
+                            field.onChange(parseCurrency(rawValue));
                           }}
                           className="currency-input"
                         />
@@ -151,14 +190,16 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                   )}
                 />
 
-                {/* Category */}
                 <FormField
                   control={form.control}
                   name="categoryId"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Categoria</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value?.toString()}>
+                      <Select
+                        onValueChange={field.onChange}
+                        value={field.value ?? ""}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione uma categoria de gasto" />
@@ -166,7 +207,10 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                         </FormControl>
                         <SelectContent>
                           {expenseCategories.map((category) => (
-                            <SelectItem key={category.id} value={category.id.toString()}>
+                            <SelectItem
+                              key={category.id ?? Math.random().toString()}
+                              value={category.id ?? ""}
+                            >
                               {category.name}
                             </SelectItem>
                           ))}
@@ -177,14 +221,16 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                   )}
                 />
 
-                {/* Period */}
                 <FormField
                   control={form.control}
                   name="period"
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Período</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value}>
+                      <Select
+                        onValueChange={field.onChange}
+                        defaultValue={field.value}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione o período" />
@@ -201,7 +247,6 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                   )}
                 />
 
-                {/* Start Date */}
                 <FormField
                   control={form.control}
                   name="startDate"
@@ -209,14 +254,26 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                     <FormItem>
                       <FormLabel>Data de Início</FormLabel>
                       <FormControl>
-                        <Input type="date" {...field} />
+                        <Input
+                          type="date"
+                          {...field}
+                          value={
+                            field.value
+                              ? formatDateForInput(new Date(field.value))
+                              : ""
+                          }
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value ? new Date(e.target.value) : null
+                            )
+                          }
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
 
-                {/* End Date */}
                 <FormField
                   control={form.control}
                   name="endDate"
@@ -224,29 +281,46 @@ export default function BudgetForm({ budget, onClose }: BudgetFormProps) {
                     <FormItem>
                       <FormLabel>Data de Fim (Opcional)</FormLabel>
                       <FormControl>
-                        <Input type="date" {...field} />
+                        <Input
+                          type="date"
+                          {...field}
+                          value={
+                            field.value
+                              ? formatDateForInput(new Date(field.value))
+                              : ""
+                          }
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value ? new Date(e.target.value) : null
+                            )
+                          }
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
 
-                {/* Submit Buttons */}
                 <div className="flex flex-col sm:flex-row gap-4 pt-6">
-                  <Button 
-                    type="button" 
-                    variant="outline" 
+                  <Button
+                    type="button"
+                    variant="outline"
                     onClick={onClose}
-                    className="sm:flex-1"
+                    disabled={isSubmitting}
+                    className="w-full sm:w-auto"
                   >
                     Cancelar
                   </Button>
-                  <Button 
-                    type="submit" 
+                  <Button
+                    type="submit"
                     disabled={isSubmitting}
-                    className="btn-primary sm:flex-1"
+                    className="w-full sm:w-auto fintech-button"
                   >
-                    {isSubmitting ? "Salvando..." : budget ? "Atualizar" : "Criar Orçamento"}
+                    {isSubmitting
+                      ? "Salvando..."
+                      : budget
+                      ? "Salvar Alterações"
+                      : "Criar Orçamento"}
                   </Button>
                 </div>
               </form>

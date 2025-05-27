@@ -8,52 +8,74 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { ArrowLeft, Plus } from "lucide-react";
 import { formatCurrency, parseCurrency } from "@/lib/currency";
 import { formatDateForInput } from "@/lib/date";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { insertTransactionSchema } from "@shared/schema";
+import { transactionSchema, type InsertTransaction } from "@shared/schema";
 import type { TransactionWithCategory, Category } from "@shared/schema";
-
-const formSchema = insertTransactionSchema.extend({
-  amount: z.string().min(1, "Valor é obrigatório"),
-  date: z.string().min(1, "Data é obrigatória"),
-});
-
-type FormData = z.infer<typeof formSchema>;
+import { useAuth } from "@/hooks/useAuth";
 
 interface TransactionFormProps {
   transaction?: TransactionWithCategory | null;
+  categories: Category[];
   onClose: () => void;
 }
 
-export default function TransactionForm({ transaction, onClose }: TransactionFormProps) {
+export default function TransactionForm({
+  transaction,
+  categories,
+  onClose,
+}: TransactionFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
 
-  const { data: categories } = useQuery<Category[]>({
-    queryKey: ["/api/categories"],
+  const form = useForm<z.infer<typeof transactionSchema>>({
+    resolver: zodResolver(transactionSchema),
+    defaultValues: transaction
+      ? {
+          ...transaction,
+          userId: transaction.userId,
+          amount: transaction.amount,
+          date: transaction.date ? new Date(transaction.date) : new Date(),
+          categoryId:
+            typeof transaction.categoryId === "string"
+              ? transaction.categoryId
+              : "",
+        }
+      : {
+          userId: user?.uid || "",
+          description: "",
+          amount: 0,
+          type: "expense",
+          date: new Date(),
+          categoryId:
+            typeof categories?.[0]?.id === "string" ? categories[0].id : "",
+          paymentMethod: "pix",
+        },
   });
 
-  const form = useForm<FormData>({
-    resolver: zodResolver(formSchema),
-    defaultValues: {
-      description: transaction?.description || "",
-      amount: transaction ? formatCurrency(parseFloat(transaction.amount)) : "",
-      type: transaction?.type || "expense",
-      categoryId: transaction?.categoryId || undefined,
-      paymentMethod: transaction?.paymentMethod || "",
-      date: transaction ? formatDateForInput(new Date(transaction.date)) : formatDateForInput(new Date()),
-    },
-  });
-
-  const createTransactionMutation = useMutation({
-    mutationFn: async (data: any) => {
-      if (transaction) {
+  const transactionMutation = useMutation({
+    mutationFn: async (data: InsertTransaction) => {
+      if (transaction && transaction.id) {
         await apiRequest("PUT", `/api/transactions/${transaction.id}`, data);
       } else {
         await apiRequest("POST", "/api/transactions", data);
@@ -61,11 +83,17 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/analytics/monthly-balance"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/analytics/category-totals"] });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/analytics/monthly-balance"],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["/api/analytics/category-totals"],
+      });
       toast({
         title: "Sucesso",
-        description: transaction ? "Transação atualizada com sucesso!" : "Transação criada com sucesso!",
+        description: transaction
+          ? "Transação atualizada com sucesso!"
+          : "Transação criada com sucesso!",
       });
       onClose();
     },
@@ -78,15 +106,26 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
     },
   });
 
-  const onSubmit = async (data: FormData) => {
+  const onSubmit = async (data: z.infer<typeof transactionSchema>) => {
     setIsSubmitting(true);
+    if (!user) {
+      toast({
+        title: "Erro",
+        description: "Você precisa estar logado.",
+        variant: "destructive",
+      });
+      setIsSubmitting(false);
+      return;
+    }
     try {
-      const formattedData = {
+      const dataToSubmit: InsertTransaction = {
         ...data,
-        amount: parseCurrency(data.amount).toString(),
-        categoryId: data.categoryId ? parseInt(data.categoryId.toString()) : null,
+        userId: user.uid,
+        amount: Number(data.amount),
+        date: data.date ? new Date(data.date) : new Date(),
+        categoryId: data.categoryId === "" ? null : data.categoryId,
       };
-      await createTransactionMutation.mutateAsync(formattedData);
+      await transactionMutation.mutateAsync(dataToSubmit);
     } catch (error) {
       console.error("Error submitting form:", error);
     } finally {
@@ -95,7 +134,8 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
   };
 
   // Filter categories based on transaction type
-  const availableCategories = categories?.filter(cat => cat.type === form.watch('type')) || [];
+  const availableCategories =
+    categories?.filter((cat) => cat.type === form.watch("type")) || [];
 
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0">
@@ -113,7 +153,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
           </CardHeader>
           <CardContent>
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+              <form
+                onSubmit={form.handleSubmit(onSubmit)}
+                className="space-y-6"
+              >
                 {/* Transaction Type */}
                 <FormField
                   control={form.control}
@@ -121,7 +164,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Tipo de Transação</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value}>
+                      <Select
+                        onValueChange={field.onChange}
+                        defaultValue={field.value}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione o tipo" />
@@ -145,7 +191,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                     <FormItem>
                       <FormLabel>Descrição</FormLabel>
                       <FormControl>
-                        <Input placeholder="Ex: Supermercado, Salário, etc." {...field} />
+                        <Input
+                          placeholder="Ex: Supermercado, Salário, etc."
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -161,12 +210,13 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                       <FormLabel>Valor</FormLabel>
                       <FormControl>
                         <Input
+                          type="text"
                           placeholder="R$ 0,00"
                           {...field}
+                          value={formatCurrency(Number(field.value || 0))}
                           onChange={(e) => {
-                            const value = e.target.value.replace(/[^\d,]/g, '');
-                            const formatted = formatCurrency(parseCurrency(value));
-                            field.onChange(formatted);
+                            const rawValue = e.target.value;
+                            field.onChange(parseCurrency(rawValue));
                           }}
                           className="currency-input"
                         />
@@ -183,7 +233,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Categoria</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value?.toString()}>
+                      <Select
+                        onValueChange={field.onChange}
+                        defaultValue={field.value?.toString()}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione uma categoria" />
@@ -191,7 +244,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                         </FormControl>
                         <SelectContent>
                           {availableCategories.map((category) => (
-                            <SelectItem key={category.id} value={category.id.toString()}>
+                            <SelectItem
+                              key={category.id}
+                              value={category.id.toString()}
+                            >
                               {category.name}
                             </SelectItem>
                           ))}
@@ -209,7 +265,10 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Método de Pagamento</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value || ""}>
+                      <Select
+                        onValueChange={field.onChange}
+                        defaultValue={field.value || ""}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Selecione o método" />
@@ -235,7 +294,20 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
                     <FormItem>
                       <FormLabel>Data</FormLabel>
                       <FormControl>
-                        <Input type="date" {...field} />
+                        <Input
+                          type="date"
+                          {...field}
+                          value={
+                            field.value
+                              ? formatDateForInput(new Date(field.value))
+                              : ""
+                          }
+                          onChange={(e) => {
+                            field.onChange(
+                              e.target.value ? new Date(e.target.value) : null
+                            );
+                          }}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -244,20 +316,24 @@ export default function TransactionForm({ transaction, onClose }: TransactionFor
 
                 {/* Submit Buttons */}
                 <div className="flex flex-col sm:flex-row gap-4 pt-6">
-                  <Button 
-                    type="button" 
-                    variant="outline" 
+                  <Button
+                    type="button"
+                    variant="outline"
                     onClick={onClose}
                     className="sm:flex-1"
                   >
                     Cancelar
                   </Button>
-                  <Button 
-                    type="submit" 
+                  <Button
+                    type="submit"
                     disabled={isSubmitting}
                     className="btn-primary sm:flex-1"
                   >
-                    {isSubmitting ? "Salvando..." : transaction ? "Atualizar" : "Criar Transação"}
+                    {isSubmitting
+                      ? "Salvando..."
+                      : transaction
+                      ? "Atualizar"
+                      : "Criar Transação"}
                   </Button>
                 </div>
               </form>
